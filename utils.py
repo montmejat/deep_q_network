@@ -65,7 +65,8 @@ class Memory:
 
     def sample(self):
         frames_dim = (self.batch_size, self.stacked_frames, *self.frame_shape)
-        actions = torch.empty((self.batch_size, self.action_count))
+        actions_hot = torch.empty((self.batch_size, self.action_count))
+        actions = torch.empty(self.batch_size, dtype=torch.int64)
         frames = torch.empty(frames_dim)
         rewards = []
         dones = []
@@ -78,16 +79,24 @@ class Memory:
             action_hot = torch.zeros((self.action_count))
             action_hot[action] = 1
 
-            actions[i] = action_hot
+            actions_hot[i] = action_hot
+            actions[i] = action
             frames[i] = self.__stack_slice(rand_index)
             rewards.append(self.memory[rand_index][2])
             dones.append(self.memory[rand_index][3])
             next_frames[i] = self.__stack_slice(rand_index + 1)
 
         return {
+            "actions_hot": actions_hot,
             "actions": actions,
             "frames": frames / 255.0,
             "rewards": torch.tensor(rewards),
             "dones": dones,
             "next_frames": next_frames / 255.0,
         }
+
+    def last_frames(self):
+        if len(self.memory) < self.stacked_frames:
+            return None
+
+        return self.__stack_slice(len(self.memory) - 1) / 255.0

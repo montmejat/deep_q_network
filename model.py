@@ -21,6 +21,9 @@ class DeepQNet(nn.Module):
             nn.Linear(256, actions_count),
         )
 
-    def forward(self, frames: torch.Tensor, actions: torch.Tensor):
+    def forward(self, frames: torch.Tensor, actions: torch.Tensor = None):
+        if actions is None:
+            return self.network(frames)
+
         output = self.network(frames)
         return output * actions
