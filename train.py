@@ -31,9 +31,15 @@ def log_epsilon(epsilon: float, iteration: int):
     )
 
 
-def log_loss(loss: torch.Tensor, iteration: int):
+def log_loss(loss: float, iteration: int):
     Logger.current_logger().report_scalar(
-        title="model", series="loss", value=loss.item(), iteration=iteration
+        title="model", series="loss", value=loss, iteration=iteration
+    )
+
+
+def log_reward(reward: float, iteration: int):
+    Logger.current_logger().report_scalar(
+        title="environment", series="reward", value=reward, iteration=iteration
     )
 
 
@@ -74,11 +80,12 @@ def log_debug_samples(batch_size: int, batch: dict, iteration: int):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--iterations", type=int, default=1_000_000)
-    parser.add_argument("--epsilon-iterations", type=int, default=500_000)
+    parser.add_argument("--iterations", type=int, default=10_000_000)
+    parser.add_argument("--epsilon-iterations", type=int, default=1_000_000)
     parser.add_argument("--epsilon-min-value", type=float, default=0.1)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--checkpoint-at", type=int, default=100_000)
+    parser.add_argument("--log-frequency", type=int, default=10)
     parser.add_argument("--log-debug-samples", action="store_true")
     args = parser.parse_args()
 
@@ -107,7 +114,9 @@ if __name__ == "__main__":
     done, truncated = True, True
 
     taken_actions = {i: 0 for i in range(env.action_space.n)}
-    last_1000_actions = collections.deque(maxlen=1000)
+    last_1000_actions = collections.deque(maxlen=5_000)
+    loss_values = []
+    reward_values = []
 
     for iteration in tqdm(range(1, args.iterations + 1)):
         epsilon = scheduler(iteration)
@@ -148,10 +157,20 @@ if __name__ == "__main__":
             loss.backward()
             optimizer.step()
 
+            loss_values.append(loss.item())
+            reward_values.append(reward)
+
             if iteration % (10 * args.batch_size) == 0:
                 log_epsilon(epsilon, iteration)
-                log_loss(loss, iteration)
                 log_actions(taken_actions, last_1000_actions, iteration)
+
+                loss = sum(loss_values) / len(loss_values)
+                loss_values = []
+                log_loss(loss, iteration)
+
+                reward = sum(reward_values) / len(reward_values)
+                reward_values = []
+                log_reward(reward, iteration)
 
                 if args.log_debug_samples:
                     log_debug_samples(args.batch_size, batch, iteration)
@@ -161,7 +180,7 @@ if __name__ == "__main__":
             torch.save(state_dict, f"{folder}/checkpoint_{iteration}.pth")
 
         if done or truncated:
-            _, info = env.reset()
+            env.reset()
 
         if info["lives"] < lives:
             lives = info["lives"]

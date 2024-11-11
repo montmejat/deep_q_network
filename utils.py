@@ -22,7 +22,7 @@ class Memory:
         stacked_frames: int = 4,
         action_count: int = 4,
         batch_size: int = 32,
-        capacity: int = 10_000,
+        capacity: int = 20_000,
         frame_shape: Tuple[int, int] = (105, 80),
     ):
         self.stacked_frames = stacked_frames
