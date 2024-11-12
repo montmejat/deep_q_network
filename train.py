@@ -80,13 +80,14 @@ def log_debug_samples(batch_size: int, batch: dict, iteration: int):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--iterations", type=int, default=10_000_000)
-    parser.add_argument("--epsilon-iterations", type=int, default=1_000_000)
+    parser.add_argument("--iterations", type=int, default=5_000_000)
+    parser.add_argument("--epsilon-iterations", type=int, default=500_000)
     parser.add_argument("--epsilon-min-value", type=float, default=0.1)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--checkpoint-at", type=int, default=100_000)
-    parser.add_argument("--log-frequency", type=int, default=10)
+    parser.add_argument("--log-frequency", type=int, default=30)
     parser.add_argument("--log-debug-samples", action="store_true")
+    parser.add_argument("--memory-capacity", type=int, default=100_000)
     args = parser.parse_args()
 
     task = Task.init(project_name="Deep Q Learning", task_name="Train")
@@ -98,9 +99,14 @@ if __name__ == "__main__":
     lives = info["lives"]
 
     scheduler = EpsilonScheduler(
-        stop_at=args.epsilon_iterations, min_value=args.epsilon_min_value
+        stop_at=args.epsilon_iterations,
+        min_value=args.epsilon_min_value,
     )
-    memory = Memory(batch_size=args.batch_size, action_count=env.action_space.n)
+    memory = Memory(
+        batch_size=args.batch_size,
+        action_count=env.action_space.n,
+        capacity=args.memory_capacity,
+    )
 
     model = DeepQNet(actions_count=env.action_space.n)
     model.train()
@@ -124,12 +130,13 @@ if __name__ == "__main__":
         if random.random() < epsilon:
             action = env.action_space.sample()
         else:
-            frames = memory.last_frames()
-            if frames is not None:
-                output = model(frames[None, :].cuda())
-                action = output.argmax().item()
-            else:
-                action = env.action_space.sample()
+            with torch.no_grad():
+                frames = memory.last_frames()
+                if frames is not None:
+                    output = model(frames[None, :].cuda())
+                    action = output.argmax().item()
+                else:
+                    action = env.action_space.sample()
 
         taken_actions[action] += 1
         last_1000_actions.append(action)
@@ -145,13 +152,14 @@ if __name__ == "__main__":
             pred_q_values = model(batch["next_frames"].cuda())
             pred_q_values[batch["dones"]] = 0
             rewards = torch.sign(batch["rewards"]).cuda()
+            # rewards = batch["rewards"].cuda()
             target_q_values = rewards + 0.99 * pred_q_values.max(dim=1).values
 
             loss = criterion(
-                target_q_values,
                 model(batch["frames"].cuda())
                 .gather(1, batch["actions"].cuda().unsqueeze(1))
                 .squeeze(1),
+                target_q_values,
             )
 
             loss.backward()
