@@ -11,12 +11,16 @@ class DeepQNet(nn.Module):
         super().__init__()
 
         self.network = nn.Sequential(
-            nn.Conv2d(stacked_frames, 16, kernel_size=8, stride=4),
+            nn.Conv2d(stacked_frames, 32, kernel_size=8, stride=4),
             nn.ReLU(),
-            nn.Conv2d(16, 32, kernel_size=4, stride=2),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(2816, 256),
+            nn.Linear(3456, 512),
+            nn.ReLU(),
+            nn.Linear(512, 256),
             nn.ReLU(),
             nn.Linear(256, actions_count),
         )

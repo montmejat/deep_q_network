@@ -80,21 +80,22 @@ def log_debug_samples(batch_size: int, batch: dict, iteration: int):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--iterations", type=int, default=5_000_000)
-    parser.add_argument("--epsilon-iterations", type=int, default=500_000)
+    parser.add_argument("--iterations", type=int, default=3_000_000)
+    parser.add_argument("--epsilon-iterations", type=int, default=300_000)
     parser.add_argument("--epsilon-min-value", type=float, default=0.1)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--checkpoint-at", type=int, default=100_000)
     parser.add_argument("--log-frequency", type=int, default=30)
     parser.add_argument("--log-debug-samples", action="store_true")
-    parser.add_argument("--memory-capacity", type=int, default=100_000)
+    parser.add_argument("--memory-capacity", type=int, default=200_000)
+    parser.add_argument("--no-clearml", action="store_true")
     args = parser.parse_args()
 
     task = Task.init(project_name="Deep Q Learning", task_name="Train")
 
     folder = create_checkpoint_folder()
 
-    env = gym.make("ALE/Breakout-v5")
+    env = gym.make("CartPole-v1")
     _, info = env.reset(seed=0)
     lives = info["lives"]
 
@@ -108,14 +109,11 @@ if __name__ == "__main__":
         capacity=args.memory_capacity,
     )
 
-    model = DeepQNet(actions_count=env.action_space.n)
-    model.train()
-    model.cuda()
+    policy_net = DeepQNet(actions_count=env.action_space.n).train().cuda()
+    target_net = DeepQNet(actions_count=env.action_space.n).eval().cuda()
 
-    optimizer = torch.optim.RMSprop(
-        model.parameters(), lr=0.00025, alpha=0.95, eps=0.01
-    )
-    criterion = torch.nn.MSELoss()
+    optimizer = torch.optim.AdamW(policy_net.parameters(), lr=1e-4, amsgrad=True)
+    criterion = torch.nn.SmoothL1Loss()
 
     done, truncated = True, True
 
@@ -133,7 +131,7 @@ if __name__ == "__main__":
             with torch.no_grad():
                 frames = memory.last_frames()
                 if frames is not None:
-                    output = model(frames[None, :].cuda())
+                    output = policy_net(frames[None, :].cuda())
                     action = output.argmax().item()
                 else:
                     action = env.action_space.sample()
@@ -144,31 +142,44 @@ if __name__ == "__main__":
         frame, reward, done, truncated, info = env.step(action)
         memory.append(action, torch.tensor(frame), reward, done)
 
-        if memory.ready_to_sample and iteration % args.batch_size == 0:
+        if memory.ready_to_sample:
             batch = memory.sample()
 
+            state_q_values = policy_net(batch["frames"].cuda())
+            actions = batch["actions"].cuda().unsqueeze(1)
+            state_q_values = state_q_values.gather(1, actions).squeeze(1)
+
+            with torch.no_grad():
+                next_state_q_values = target_net(batch["next_frames"].cuda())
+                next_state_q_values[batch["dones"]] = 0
+                next_state_q_values = next_state_q_values.max(1).values
+
+            rewards = batch["rewards"].cuda()
+            target_q_values = rewards + 0.99 * next_state_q_values
+
+            loss = criterion(state_q_values, target_q_values)
+
             optimizer.zero_grad()
-
-            pred_q_values = model(batch["next_frames"].cuda())
-            pred_q_values[batch["dones"]] = 0
-            rewards = torch.sign(batch["rewards"]).cuda()
-            # rewards = batch["rewards"].cuda()
-            target_q_values = rewards + 0.99 * pred_q_values.max(dim=1).values
-
-            loss = criterion(
-                model(batch["frames"].cuda())
-                .gather(1, batch["actions"].cuda().unsqueeze(1))
-                .squeeze(1),
-                target_q_values,
-            )
-
             loss.backward()
+
+            torch.nn.utils.clip_grad_value_(policy_net.parameters(), 100)
+
             optimizer.step()
+
+            target_net_state_dict = target_net.state_dict()
+            policy_net_state_dict = policy_net.state_dict()
+
+            for key in policy_net_state_dict:
+                target_net_state_dict[key] = policy_net_state_dict[
+                    key
+                ] * 0.005 + target_net_state_dict[key] * (1 - 0.005)
+
+            target_net.load_state_dict(target_net_state_dict)
 
             loss_values.append(loss.item())
             reward_values.append(reward)
 
-            if iteration % (10 * args.batch_size) == 0:
+            if not args.no_clearml and iteration % (10 * args.batch_size) == 0:
                 log_epsilon(epsilon, iteration)
                 log_actions(taken_actions, last_1000_actions, iteration)
 
@@ -184,7 +195,7 @@ if __name__ == "__main__":
                     log_debug_samples(args.batch_size, batch, iteration)
 
         if iteration % args.checkpoint_at == 0:
-            state_dict = model.state_dict()
+            state_dict = policy_net.state_dict()
             torch.save(state_dict, f"{folder}/checkpoint_{iteration}.pth")
 
         if done or truncated:
