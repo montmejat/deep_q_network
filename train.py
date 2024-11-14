@@ -4,15 +4,14 @@ import os
 import random
 from datetime import datetime
 
-import ale_py  # noqa: F401
-import gymnasium as gym
 import numpy as np
 import torch
 from clearml import Logger, Task
 from PIL import Image
 from tqdm import tqdm
 
-from model import DeepQNet
+from environment import Breakout, CartPole
+from model import ConvNet, DeepNet
 from utils import EpsilonScheduler, Memory
 
 
@@ -88,16 +87,17 @@ if __name__ == "__main__":
     parser.add_argument("--log-frequency", type=int, default=30)
     parser.add_argument("--log-debug-samples", action="store_true")
     parser.add_argument("--memory-capacity", type=int, default=200_000)
-    parser.add_argument("--no-clearml", action="store_true")
+    parser.add_argument("--environment", type=str, default="CartPole")
+    parser.add_argument("--model", type=str, default="DeepNet")
     args = parser.parse_args()
 
     task = Task.init(project_name="Deep Q Learning", task_name="Train")
 
     folder = create_checkpoint_folder()
 
-    env = gym.make("CartPole-v1")
-    _, info = env.reset(seed=0)
-    lives = info["lives"]
+    env = Breakout() if args.environment == "Breakout" else CartPole()
+
+    env.reset()
 
     scheduler = EpsilonScheduler(
         stop_at=args.epsilon_iterations,
@@ -109,16 +109,13 @@ if __name__ == "__main__":
         capacity=args.memory_capacity,
     )
 
-    policy_net = DeepQNet(actions_count=env.action_space.n).train().cuda()
-    target_net = DeepQNet(actions_count=env.action_space.n).eval().cuda()
+    model_type = ConvNet if args.model == "ConvNet" else DeepNet
+    policy_net = model_type(actions_count=env.action_space.n).train().cuda()
+    target_net = model_type(actions_count=env.action_space.n).eval().cuda()
 
     optimizer = torch.optim.AdamW(policy_net.parameters(), lr=1e-4, amsgrad=True)
     criterion = torch.nn.SmoothL1Loss()
 
-    done, truncated = True, True
-
-    taken_actions = {i: 0 for i in range(env.action_space.n)}
-    last_1000_actions = collections.deque(maxlen=5_000)
     loss_values = []
     reward_values = []
 
@@ -131,15 +128,11 @@ if __name__ == "__main__":
             with torch.no_grad():
                 frames = memory.last_frames()
                 if frames is not None:
-                    output = policy_net(frames[None, :].cuda())
-                    action = output.argmax().item()
+                    action = policy_net(frames[None, :].cuda()).argmax().item()
                 else:
                     action = env.action_space.sample()
 
-        taken_actions[action] += 1
-        last_1000_actions.append(action)
-
-        frame, reward, done, truncated, info = env.step(action)
+        frame, reward, done, lost_life, truncated, info = env.step(action)
         memory.append(action, torch.tensor(frame), reward, done)
 
         if memory.ready_to_sample:
@@ -179,9 +172,9 @@ if __name__ == "__main__":
             loss_values.append(loss.item())
             reward_values.append(reward)
 
-            if not args.no_clearml and iteration % (10 * args.batch_size) == 0:
+            if iteration % (10 * args.batch_size) == 0:
                 log_epsilon(epsilon, iteration)
-                log_actions(taken_actions, last_1000_actions, iteration)
+                log_actions(env.taken_actions, env.last_n_actions, iteration)
 
                 loss = sum(loss_values) / len(loss_values)
                 loss_values = []
@@ -195,14 +188,12 @@ if __name__ == "__main__":
                     log_debug_samples(args.batch_size, batch, iteration)
 
         if iteration % args.checkpoint_at == 0:
-            state_dict = policy_net.state_dict()
-            torch.save(state_dict, f"{folder}/checkpoint_{iteration}.pth")
+            torch.save(policy_net.state_dict(), f"{folder}/checkpoint_{iteration}.pth")
 
         if done or truncated:
             env.reset()
 
-        if info["lives"] < lives:
-            lives = info["lives"]
+        if lost_life:
             env.step(1)
 
     env.close()
