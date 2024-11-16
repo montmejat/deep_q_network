@@ -1,10 +1,7 @@
 import argparse
-import math
-import random
 from itertools import count
 
 import gymnasium as gym
-import matplotlib.pyplot as plt
 import tomllib
 import torch
 import torch.nn as nn
@@ -12,27 +9,8 @@ import torch.optim as optim
 from clearml import Logger, Task
 from tqdm import tqdm
 
-from models import DQN
-from utils import ReplayMemory, Transition
-
-
-def select_action(state):
-    global steps_done
-    sample = random.random()
-    eps_threshold = epsilon_end + (epsilon_start - epsilon_end) * math.exp(
-        -1.0 * steps_done / epsilon_decay_steps
-    )
-    steps_done += 1
-    if sample > eps_threshold:
-        with torch.no_grad():
-            # t.max(1) will return the largest column value of each row.
-            # second column on max result is index of where max element was
-            # found, so we pick action with the larger expected reward.
-            return policy_net(state).max(1).indices.view(1, 1)
-    else:
-        return torch.tensor(
-            [[env.action_space.sample()]], device="cuda", dtype=torch.long
-        )
+from models import DeepQNet
+from utils import EpsilonScheduler, ReplayMemory, Transition
 
 
 def optimize_model():
@@ -116,10 +94,11 @@ if __name__ == "__main__":
     state, info = env.reset()
     n_observations = len(state)
 
-    policy_net = DQN(n_observations, n_actions).cuda()
-    target_net = DQN(n_observations, n_actions).cuda()
+    policy_net = DeepQNet(n_observations, n_actions).cuda()
+    target_net = DeepQNet(n_observations, n_actions).cuda()
     target_net.load_state_dict(policy_net.state_dict())
 
+    epsilon = EpsilonScheduler(epsilon_start, epsilon_end, epsilon_decay_steps)
     optimizer = optim.AdamW(policy_net.parameters(), lr=lr, amsgrad=True)
     memory = ReplayMemory(10000)
 
@@ -127,12 +106,14 @@ if __name__ == "__main__":
 
     episode_durations = []
 
-    for i_episode in tqdm(range(episodes)):
-        # Initialize the environment and get its state
+    for episode in tqdm(range(episodes)):
         state, info = env.reset()
         state = torch.tensor(state, dtype=torch.float32, device="cuda").unsqueeze(0)
+
         for t in count():
-            action = select_action(state)
+            prob_rand = epsilon.next()
+
+            action = policy_net.select_action(state, prob_rand)
             observation, reward, terminated, truncated, _ = env.step(action.item())
             reward = torch.tensor([reward], device="cuda")
             done = terminated or truncated
@@ -167,8 +148,5 @@ if __name__ == "__main__":
                 episode_durations.append(t + 1)
                 break
 
-        Logger.current_logger().report_scalar("Episode length", "length", t, i_episode)
-
-    print("Complete")
-    plt.ioff()
-    plt.show()
+        Logger.current_logger().report_scalar("Episode length", "length", t, episode)
+        Logger.current_logger().report_scalar("Epsilon", "epsilon", prob_rand, episode)
