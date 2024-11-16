@@ -1,0 +1,21 @@
+[general]
+episodes = 600
+batch_size = 128
+checkpoints = 100_000
+environment = "CartPole"
+model = "DeepNet"
+gamma = 0.99
+tau = 0.005
+lr = 1e-4
+
+[epsilon]
+decay_steps = 1_000
+start = 0.9
+end = 0.05
+
+[memory]
+capacity = 10_000
+
+[logging]
+frequency = 1
+debug_samples = false

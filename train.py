@@ -1,199 +1,174 @@
 import argparse
-import collections
-import os
+import math
 import random
-from datetime import datetime
+from itertools import count
 
-import numpy as np
+import gymnasium as gym
+import matplotlib.pyplot as plt
+import tomllib
 import torch
+import torch.nn as nn
+import torch.optim as optim
 from clearml import Logger, Task
-from PIL import Image
 from tqdm import tqdm
 
-from environment import Breakout, CartPole
-from model import ConvNet, DeepNet
-from utils import EpsilonScheduler, Memory
+from models import DQN
+from utils import ReplayMemory, Transition
 
 
-def create_checkpoint_folder():
-    if not os.path.exists("checkpoints"):
-        os.makedirs("checkpoints")
-    folder = f"checkpoints/{datetime.now().isoformat()}"
-    os.makedirs(folder)
-
-    return folder
-
-
-def log_epsilon(epsilon: float, iteration: int):
-    Logger.current_logger().report_scalar(
-        title="parameters", series="epsilon", value=epsilon, iteration=iteration
+def select_action(state):
+    global steps_done
+    sample = random.random()
+    eps_threshold = epsilon_end + (epsilon_start - epsilon_end) * math.exp(
+        -1.0 * steps_done / epsilon_decay_steps
     )
+    steps_done += 1
+    if sample > eps_threshold:
+        with torch.no_grad():
+            # t.max(1) will return the largest column value of each row.
+            # second column on max result is index of where max element was
+            # found, so we pick action with the larger expected reward.
+            return policy_net(state).max(1).indices.view(1, 1)
+    else:
+        return torch.tensor(
+            [[env.action_space.sample()]], device="cuda", dtype=torch.long
+        )
 
 
-def log_loss(loss: float, iteration: int):
-    Logger.current_logger().report_scalar(
-        title="model", series="loss", value=loss, iteration=iteration
+def optimize_model():
+    if len(memory) < batch_size:
+        return
+    transitions = memory.sample(batch_size)
+    # Transpose the batch (see https://stackoverflow.com/a/19343/3343043 for
+    # detailed explanation). This converts batch-array of Transitions
+    # to Transition of batch-arrays.
+    batch = Transition(*zip(*transitions))
+
+    # Compute a mask of non-final states and concatenate the batch elements
+    # (a final state would've been the one after which simulation ended)
+    non_final_mask = torch.tensor(
+        tuple(map(lambda s: s is not None, batch.next_state)),
+        device="cuda",
+        dtype=torch.bool,
     )
+    non_final_next_states = torch.cat([s for s in batch.next_state if s is not None])
+    state_batch = torch.cat(batch.state)
+    action_batch = torch.cat(batch.action)
+    reward_batch = torch.cat(batch.reward)
 
+    # Compute Q(s_t, a) - the model computes Q(s_t), then we select the
+    # columns of actions taken. These are the actions which would've been taken
+    # for each batch state according to policy_net
+    state_action_values = policy_net(state_batch).gather(1, action_batch)
 
-def log_reward(reward: float, iteration: int):
-    Logger.current_logger().report_scalar(
-        title="environment", series="reward", value=reward, iteration=iteration
-    )
-
-
-def log_actions(
-    taken_actions: dict, last_1000_actions: collections.deque, iteration: int
-):
-    for taken_action in taken_actions:
-        Logger.current_logger().report_scalar(
-            title="actions (%)",
-            series=f"action '{taken_action}'",
-            value=taken_actions[taken_action] / sum(taken_actions.values()),
-            iteration=iteration,
+    # Compute V(s_{t+1}) for all next states.
+    # Expected values of actions for non_final_next_states are computed based
+    # on the "older" target_net; selecting their best reward with max(1).values
+    # This is merged based on the mask, such that we'll have either the expected
+    # state value or 0 in case the state was final.
+    next_state_values = torch.zeros(batch_size, device="cuda")
+    with torch.no_grad():
+        next_state_values[non_final_mask] = (
+            target_net(non_final_next_states).max(1).values
         )
+    # Compute the expected Q values
+    expected_state_action_values = (next_state_values * gamma) + reward_batch
 
-        Logger.current_logger().report_scalar(
-            title="actions (%, last 1000)",
-            series=f"action '{taken_action}'",
-            value=last_1000_actions.count(taken_action) / len(last_1000_actions),
-            iteration=iteration,
-        )
+    # Compute Huber loss
+    criterion = nn.SmoothL1Loss()
+    loss = criterion(state_action_values, expected_state_action_values.unsqueeze(1))
 
-
-def log_debug_samples(batch_size: int, batch: dict, iteration: int):
-    for i in range(batch_size):
-        frames = batch["frames"][i]
-        frames = (
-            (torch.hstack([frame * 255 for frame in frames])).numpy().astype(np.uint8)
-        )
-        image = Image.fromarray(frames)
-
-        Logger.current_logger().report_image(
-            title="Training frames",
-            series=f"Batch {i}",
-            iteration=iteration,
-            image=image,
-        )
+    # Optimize the model
+    optimizer.zero_grad()
+    loss.backward()
+    # In-place gradient clipping
+    torch.nn.utils.clip_grad_value_(policy_net.parameters(), 100)
+    optimizer.step()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--iterations", type=int, default=3_000_000)
-    parser.add_argument("--epsilon-iterations", type=int, default=300_000)
-    parser.add_argument("--epsilon-min-value", type=float, default=0.1)
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--checkpoint-at", type=int, default=100_000)
-    parser.add_argument("--log-frequency", type=int, default=30)
-    parser.add_argument("--log-debug-samples", action="store_true")
-    parser.add_argument("--memory-capacity", type=int, default=200_000)
-    parser.add_argument("--environment", type=str, default="CartPole")
-    parser.add_argument("--model", type=str, default="DeepNet")
+    parser.add_argument("config", type=str)
     args = parser.parse_args()
 
-    task = Task.init(project_name="Deep Q Learning", task_name="Train")
+    with open(args.config, "rb") as f:
+        config = tomllib.load(f)
 
-    folder = create_checkpoint_folder()
+    episodes = config["general"]["episodes"]
+    batch_size = config["general"]["batch_size"]
+    gamma = config["general"]["gamma"]
+    tau = config["general"]["tau"]
+    lr = config["general"]["lr"]
+    epsilon_decay_steps = config["epsilon"]["decay_steps"]
+    epsilon_start = config["epsilon"]["start"]
+    epsilon_end = config["epsilon"]["end"]
 
-    env = Breakout() if args.environment == "Breakout" else CartPole()
-
-    env.reset()
-
-    scheduler = EpsilonScheduler(
-        stop_at=args.epsilon_iterations,
-        min_value=args.epsilon_min_value,
+    task = Task.init(
+        project_name="Deep Q Learning/CartPole",
+        task_name="Train",
+        reuse_last_task_id=False,
     )
-    memory = Memory(
-        batch_size=args.batch_size,
-        action_count=env.action_space.n,
-        capacity=args.memory_capacity,
-    )
+    task.connect(config)
 
-    model_type = ConvNet if args.model == "ConvNet" else DeepNet
-    policy_net = model_type(actions_count=env.action_space.n).train().cuda()
-    target_net = model_type(actions_count=env.action_space.n).eval().cuda()
+    env = gym.make("CartPole-v1")
 
-    optimizer = torch.optim.AdamW(policy_net.parameters(), lr=1e-4, amsgrad=True)
-    criterion = torch.nn.SmoothL1Loss()
+    n_actions = env.action_space.n
+    state, info = env.reset()
+    n_observations = len(state)
 
-    loss_values = []
-    reward_values = []
+    policy_net = DQN(n_observations, n_actions).cuda()
+    target_net = DQN(n_observations, n_actions).cuda()
+    target_net.load_state_dict(policy_net.state_dict())
 
-    for iteration in tqdm(range(1, args.iterations + 1)):
-        epsilon = scheduler(iteration)
+    optimizer = optim.AdamW(policy_net.parameters(), lr=lr, amsgrad=True)
+    memory = ReplayMemory(10000)
 
-        if random.random() < epsilon:
-            action = env.action_space.sample()
-        else:
-            with torch.no_grad():
-                frames = memory.last_frames()
-                if frames is not None:
-                    action = policy_net(frames[None, :].cuda()).argmax().item()
-                else:
-                    action = env.action_space.sample()
+    steps_done = 0
 
-        frame, reward, done, lost_life, truncated, info = env.step(action)
-        memory.append(action, torch.tensor(frame), reward, done)
+    episode_durations = []
 
-        if memory.ready_to_sample:
-            batch = memory.sample()
+    for i_episode in tqdm(range(episodes)):
+        # Initialize the environment and get its state
+        state, info = env.reset()
+        state = torch.tensor(state, dtype=torch.float32, device="cuda").unsqueeze(0)
+        for t in count():
+            action = select_action(state)
+            observation, reward, terminated, truncated, _ = env.step(action.item())
+            reward = torch.tensor([reward], device="cuda")
+            done = terminated or truncated
 
-            state_q_values = policy_net(batch["frames"].cuda())
-            actions = batch["actions"].cuda().unsqueeze(1)
-            state_q_values = state_q_values.gather(1, actions).squeeze(1)
+            if terminated:
+                next_state = None
+            else:
+                next_state = torch.tensor(
+                    observation, dtype=torch.float32, device="cuda"
+                ).unsqueeze(0)
 
-            with torch.no_grad():
-                next_state_q_values = target_net(batch["next_frames"].cuda())
-                next_state_q_values[batch["dones"]] = 0
-                next_state_q_values = next_state_q_values.max(1).values
+            # Store the transition in memory
+            memory.push(state, action, next_state, reward)
 
-            rewards = batch["rewards"].cuda()
-            target_q_values = rewards + 0.99 * next_state_q_values
+            # Move to the next state
+            state = next_state
 
-            loss = criterion(state_q_values, target_q_values)
+            # Perform one step of the optimization (on the policy network)
+            optimize_model()
 
-            optimizer.zero_grad()
-            loss.backward()
-
-            torch.nn.utils.clip_grad_value_(policy_net.parameters(), 100)
-
-            optimizer.step()
-
+            # Soft update of the target network's weights
+            # θ′ ← τ θ + (1 −τ )θ′
             target_net_state_dict = target_net.state_dict()
             policy_net_state_dict = policy_net.state_dict()
-
             for key in policy_net_state_dict:
                 target_net_state_dict[key] = policy_net_state_dict[
                     key
-                ] * 0.005 + target_net_state_dict[key] * (1 - 0.005)
-
+                ] * tau + target_net_state_dict[key] * (1 - tau)
             target_net.load_state_dict(target_net_state_dict)
 
-            loss_values.append(loss.item())
-            reward_values.append(reward)
+            if done:
+                episode_durations.append(t + 1)
+                break
 
-            if iteration % (10 * args.batch_size) == 0:
-                log_epsilon(epsilon, iteration)
-                log_actions(env.taken_actions, env.last_n_actions, iteration)
+        Logger.current_logger().report_scalar("Episode length", "length", t, i_episode)
 
-                loss = sum(loss_values) / len(loss_values)
-                loss_values = []
-                log_loss(loss, iteration)
-
-                reward = sum(reward_values) / len(reward_values)
-                reward_values = []
-                log_reward(reward, iteration)
-
-                if args.log_debug_samples:
-                    log_debug_samples(args.batch_size, batch, iteration)
-
-        if iteration % args.checkpoint_at == 0:
-            torch.save(policy_net.state_dict(), f"{folder}/checkpoint_{iteration}.pth")
-
-        if done or truncated:
-            env.reset()
-
-        if lost_life:
-            env.step(1)
-
-    env.close()
+    print("Complete")
+    plt.ioff()
+    plt.show()
