@@ -23,11 +23,8 @@ class DeepQNet(nn.Module):
     @torch.no_grad()
     def select_action(self, state: torch.Tensor, p_random: float) -> int:
         if random() > p_random:
-            return self.network(state).max(1).indices.view(1, 1)
-        return torch.tensor([[randint(0, self.action_space_size - 1)]]).cuda()
-        # if random() > p_random:
-        #     return self.network(state).max(1).indices.item()
-        # return randint(0, self.action_space_size - 1)
+            return self.network(state).max(1).indices.item()
+        return randint(0, self.action_space_size - 1)
 
     def copy_weights(self, other: nn.Module, tau: float):
         other_sd = other.state_dict()

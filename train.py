@@ -1,8 +1,8 @@
 import argparse
-import random
+import os
+from datetime import datetime
 from itertools import count
 
-import gymnasium as gym
 import tomllib
 import torch
 import torch.nn as nn
@@ -10,14 +10,25 @@ import torch.optim as optim
 from clearml import Logger, Task
 from tqdm import tqdm
 
+from environment import Breakout, CartPole
 from models import DeepQNet
 from utils import EpsilonScheduler, Memory
+
+
+def create_checkpoint_folder(name: str):
+    if not os.path.exists("checkpoints"):
+        os.makedirs("checkpoints")
+    folder = f"checkpoints/{name.replace(" ", "-")}_{datetime.now().isoformat()}"
+    os.makedirs(folder)
+    return folder
 
 
 def load_params(config_path: str):
     global \
         episodes, \
         batch_size, \
+        environment, \
+        checkpoints, \
         gamma, \
         tau, \
         lr, \
@@ -31,6 +42,8 @@ def load_params(config_path: str):
 
     episodes = config["general"]["episodes"]
     batch_size = config["general"]["batch_size"]
+    environment = config["general"]["environment"]
+    checkpoints = config["general"]["checkpoints"]
     gamma = config["general"]["gamma"]
     tau = config["general"]["tau"]
     lr = config["general"]["lr"]
@@ -42,20 +55,46 @@ def load_params(config_path: str):
     return config
 
 
+def log_actions(taken_actions: dict, last_n_actions: list, iteration: int):
+    for taken_action in taken_actions:
+        Logger.current_logger().report_scalar(
+            title="Actions (%, total)",
+            series=f"action '{taken_action}'",
+            value=taken_actions[taken_action] / sum(taken_actions.values()),
+            iteration=iteration,
+        )
+
+        Logger.current_logger().report_scalar(
+            title="Actions (%, last 1000)",
+            series=f"action '{taken_action}'",
+            value=last_n_actions.count(taken_action) / len(last_n_actions),
+            iteration=iteration,
+        )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("config", type=str)
     args = parser.parse_args()
 
+    config = load_params(args.config)
+    folder = create_checkpoint_folder(environment)
+
     task = Task.init(
-        project_name="Deep Q Learning/CartPole",
+        project_name=f"Deep Q Learning/{environment}",
         task_name="Train",
         reuse_last_task_id=False,
     )
-    config = load_params(args.config)
     task.connect(config)
 
-    env = gym.make("CartPole-v1")
+    match environment:
+        case "Cart Pole":
+            env = CartPole()
+        case "Breakout":
+            env = Breakout()
+        case _:
+            raise ValueError(f"Unknown environment: {environment}")
+
     state, _ = env.reset()
 
     train_net = DeepQNet(len(state), env.action_space.n).cuda()
@@ -76,16 +115,14 @@ if __name__ == "__main__":
             prob_rand = epsilon.next()
             action = train_net.select_action(prev_state, prob_rand)
 
-            observation, reward, terminated, truncated, _ = env.step(action.item())
-            reward = torch.tensor([reward], device="cuda")
+            next_state, reward, terminated, truncated, _ = env.step(action)
+            reward = torch.tensor([reward]).cuda()
 
-            memory.push(prev_state, action.item(), observation, reward, terminated)
-            prev_state = torch.tensor(observation).cuda().unsqueeze(0)
+            memory.push(prev_state, action, next_state, reward, terminated)
+            prev_state = torch.tensor(next_state).cuda().unsqueeze(0)
 
             if len(memory) >= batch_size:
-                samples = random.sample(range(len(memory)), batch_size)
-
-                batch = memory.sample(samples)
+                batch = memory.sample()
 
                 state_q_values = train_net(batch["states"]).gather(1, batch["actions"])
 
@@ -97,7 +134,6 @@ if __name__ == "__main__":
                 target_state_q_values = (next_state_q_values * gamma) + batch["rewards"]
 
                 loss = criterion(state_q_values, target_state_q_values.unsqueeze(1))
-
                 losses.append(loss.item())
 
                 optimizer.zero_grad()
@@ -114,3 +150,7 @@ if __name__ == "__main__":
         Logger.current_logger().report_scalar("Epsilon", "epsilon", prob_rand, episode)
         loss = sum(losses) / len(losses) if losses else 0
         Logger.current_logger().report_scalar("Loss", "loss", loss, episode)
+        log_actions(env.taken_actions, env.last_n_actions, episode)
+
+        if (episode + 1) % checkpoints == 0:
+            torch.save(train_net.state_dict(), f"{folder}/checkpoint_{episode}.pth")

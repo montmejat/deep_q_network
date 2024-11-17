@@ -1,8 +1,8 @@
 [general]
 episodes = 600
 batch_size = 128
-checkpoints = 100_000
-environment = "CartPole"
+checkpoints = 600
+environment = "Cart Pole"
 model = "DeepNet"
 gamma = 0.99
 tau = 0.005
