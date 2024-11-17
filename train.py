@@ -11,8 +11,8 @@ from clearml import Logger, Task
 from tqdm import tqdm
 
 from environment import Breakout, CartPole
-from models import DeepQNet
-from utils import EpsilonScheduler, Memory
+from models import DeepQNet, DeepQConvNet
+from utils import EpsilonScheduler, Memory, ImageMemory
 
 
 def create_checkpoint_folder(name: str):
@@ -90,38 +90,58 @@ if __name__ == "__main__":
     match environment:
         case "Cart Pole":
             env = CartPole()
+            train_net = DeepQNet(4, env.action_space.n).cuda()
+            eval_net = DeepQNet(4, env.action_space.n).cuda()
+            memory = Memory(memory_capacity, batch_size, observation_size=4)
+
         case "Breakout":
             env = Breakout()
+            train_net = DeepQConvNet(env.action_space.n, stacked_frames=4).cuda()
+            eval_net = DeepQConvNet(env.action_space.n, stacked_frames=4).cuda()
+            memory = ImageMemory(
+                env.action_space.n,
+                batch_size,
+                memory_capacity,
+                stacked_frames=4,
+                frame_shape=(105, 80),
+            )
+
+            state, _ = env.reset()
+
+            action = 1  # Fire to start the game
+            next_state, reward, terminated, _, _ = env.step(action)
+            memory.push(state, action, next_state, reward, terminated)
+            prev_state = next_state
+
+            for _ in range(3):
+                action = env.action_space.sample()
+                next_state, reward, terminated, _, _ = env.step(action)
+                memory.push(prev_state, action, next_state, reward, terminated)
+                prev_state = next_state
+
         case _:
             raise ValueError(f"Unknown environment: {environment}")
 
-    state, _ = env.reset()
-
-    train_net = DeepQNet(len(state), env.action_space.n).cuda()
-    eval_net = DeepQNet(len(state), env.action_space.n).cuda()
     eval_net.load_state_dict(train_net.state_dict())
 
     epsilon = EpsilonScheduler(epsilon_start, epsilon_end, epsilon_decay_steps)
     optimizer = optim.AdamW(train_net.parameters(), lr=lr, amsgrad=True)
     criterion = nn.SmoothL1Loss()
-    memory = Memory(memory_capacity, batch_size, len(state))
 
     for episode in tqdm(range(episodes)):
-        state, _ = env.reset()
-        prev_state = torch.tensor(state).cuda().unsqueeze(0)
+        prev_state = memory.last_states()
         losses = []
 
         for t in count():
-            prob_rand = epsilon.next()
-            action = train_net.select_action(prev_state, prob_rand)
+            p_rand = epsilon.next()
+            action = train_net.select_action(train_net.preprocess(prev_state), p_rand)
 
-            next_state, reward, terminated, truncated, _ = env.step(action)
-            reward = torch.tensor([reward]).cuda()
+            next_state, reward, terminated, truncated, info = env.step(action)
+            memory.push(prev_state[-1], action, next_state, reward, terminated)
 
-            memory.push(prev_state, action, next_state, reward, terminated)
-            prev_state = torch.tensor(next_state).cuda().unsqueeze(0)
+            prev_state = memory.last_states()
 
-            if len(memory) >= batch_size:
+            if len(memory) >= batch_size + 4:
                 batch = memory.sample()
 
                 state_q_values = train_net(batch["states"]).gather(1, batch["actions"])
@@ -144,13 +164,23 @@ if __name__ == "__main__":
                 eval_net.copy_weights(train_net, tau)
 
             if terminated or truncated:
+                state, _ = env.reset()
+                action = 1  # Fire to start the game
+                next_state, reward, terminated, _, _ = env.step(action)
+                memory.push(state, action, next_state, reward, terminated)
+                break
+
+            if info["lost_life"]:
+                action = 1  # Fire to start the game
+                next_state, reward, terminated, _, _ = env.step(action)
+                memory.push(state, action, next_state, reward, terminated)
                 break
 
         Logger.current_logger().report_scalar("Episode length", "length", t, episode)
-        Logger.current_logger().report_scalar("Epsilon", "epsilon", prob_rand, episode)
+        Logger.current_logger().report_scalar("Epsilon", "epsilon", p_rand, episode)
         loss = sum(losses) / len(losses) if losses else 0
         Logger.current_logger().report_scalar("Loss", "loss", loss, episode)
         log_actions(env.taken_actions, env.last_n_actions, episode)
 
         if (episode + 1) % checkpoints == 0:
-            torch.save(train_net.state_dict(), f"{folder}/checkpoint_{episode}.pth")
+            torch.save(train_net.state_dict(), f"{folder}/checkpoint_{episode + 1}.pth")

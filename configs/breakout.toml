@@ -1,0 +1,20 @@
+[general]
+episodes = 10_000
+batch_size = 128
+checkpoints = 1_000
+environment = "Breakout"
+model = "ConvNet"
+gamma = 0.99
+tau = 0.005
+lr = 1e-4
+
+[epsilon]
+decay_steps = 50_000
+start = 1.0
+end = 0.1
+
+[memory]
+capacity = 100_000
+
+[logging]
+frequency = 1

@@ -42,12 +42,12 @@ class Breakout:
         self.taken_actions[action] += 1
         self.last_n_actions.append(action)
 
-        lost_life = False
+        info["lost_life"] = False
         if self.lives > info["lives"]:
             self.lives = info["lives"]
-            lost_life = True
+            info["lost_life"] = True
 
-        return frame, reward, done, lost_life, truncated, info
+        return frame, reward, done, truncated, info
 
     def close(self):
         self.env.close()

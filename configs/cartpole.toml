@@ -18,4 +18,3 @@ capacity = 10_000
 
 [logging]
 frequency = 1
-debug_samples = false
