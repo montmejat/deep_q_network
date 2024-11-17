@@ -1,19 +1,55 @@
-import math
 import random
+import math
 from collections import deque, namedtuple
 
-Transition = namedtuple("Transition", ("state", "action", "next_state", "reward"))
+import numpy as np
+import torch
+
+Transition = namedtuple(
+    "Transition", ("state", "action", "next_state", "reward", "terminated")
+)
 
 
-class ReplayMemory:
-    def __init__(self, capacity: int):
+class Memory:
+    def __init__(self, capacity: int, batch_size: int, observation_size: int):
         self.memory = deque([], maxlen=capacity)
+        self.batch_size = batch_size
+        self.observation_size = observation_size
 
-    def push(self, *args):
-        self.memory.append(Transition(*args))
+    def push(
+        self,
+        state: torch.Tensor,
+        action: int,
+        next_state: np.ndarray,
+        reward: float,
+        terminated: bool,
+    ):
+        next_state = torch.tensor(next_state).cuda().unsqueeze(0)
+        self.memory.append(Transition(state, action, next_state, reward, terminated))
 
-    def sample(self, batch_size: int):
-        return random.sample(self.memory, batch_size)
+    def sample(self):
+        actions = torch.empty((self.batch_size, 1), dtype=torch.int64)
+        states = torch.empty((self.batch_size, self.observation_size))
+        next_states = torch.empty((self.batch_size, self.observation_size))
+        rewards = torch.empty(self.batch_size)
+        terminated = []
+
+        for i, rand_index in enumerate(
+            random.sample(range(len(self.memory)), self.batch_size)
+        ):
+            states[i] = self.memory[rand_index].state
+            actions[i] = self.memory[rand_index].action
+            next_states[i] = self.memory[rand_index].next_state
+            rewards[i] = self.memory[rand_index].reward
+            terminated.append(self.memory[rand_index].terminated)
+
+        return {
+            "states": states.cuda(),
+            "actions": actions.cuda(),
+            "next_states": next_states.cuda(),
+            "rewards": rewards.cuda(),
+            "terminated": terminated,
+        }
 
     def __len__(self):
         return len(self.memory)
