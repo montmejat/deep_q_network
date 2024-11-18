@@ -94,6 +94,12 @@ if __name__ == "__main__":
             eval_net = DeepQNet(4, env.action_space.n).cuda()
             memory = Memory(memory_capacity, batch_size, observation_size=4)
 
+            state, _ = env.reset()
+
+            action = env.action_space.sample()
+            next_state, reward, terminated, _, _ = env.step(action)
+            memory.push(state, action, next_state, reward, terminated)
+
         case "Breakout":
             env = Breakout()
             train_net = DeepQConvNet(env.action_space.n, stacked_frames=4).cuda()
@@ -138,6 +144,7 @@ if __name__ == "__main__":
 
             next_state, reward, terminated, truncated, info = env.step(action)
             memory.push(prev_state[-1], action, next_state, reward, terminated)
+            # memory.push(prev_state, action, next_state, reward, terminated)
 
             prev_state = memory.last_states()
 
@@ -170,7 +177,7 @@ if __name__ == "__main__":
                 memory.push(state, action, next_state, reward, terminated)
                 break
 
-            if info["lost_life"]:
+            if "lost_life" in info and info["lost_life"]:
                 action = 1  # Fire to start the game
                 next_state, reward, terminated, _, _ = env.step(action)
                 memory.push(state, action, next_state, reward, terminated)

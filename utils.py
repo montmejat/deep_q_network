@@ -29,12 +29,11 @@ class Memory:
         reward: float,
         terminated: bool,
     ):
-        next_state = torch.tensor(next_state).cuda().unsqueeze(0)
         self.memory.append(Transition(state, action, next_state, reward, terminated))
 
     def sample(self):
-        actions = torch.empty((self.batch_size, 1), dtype=torch.int64)
         states = torch.empty((self.batch_size, self.observation_size))
+        actions = torch.empty((self.batch_size, 1), dtype=torch.int64)
         next_states = torch.empty((self.batch_size, self.observation_size))
         rewards = torch.empty(self.batch_size)
         terminated = []
@@ -42,9 +41,9 @@ class Memory:
         for i, rand_index in enumerate(
             random.sample(range(len(self.memory)), self.batch_size)
         ):
-            states[i] = self.memory[rand_index].state
+            states[i] = torch.tensor(self.memory[rand_index].state)
             actions[i] = self.memory[rand_index].action
-            next_states[i] = self.memory[rand_index].next_state
+            next_states[i] = torch.tensor(self.memory[rand_index].next_state)
             rewards[i] = self.memory[rand_index].reward
             terminated.append(self.memory[rand_index].terminated)
 
@@ -55,6 +54,9 @@ class Memory:
             "rewards": rewards.cuda(),
             "terminated": terminated,
         }
+
+    def last_states(self):
+        return self.memory[-1].next_state
 
     def __len__(self):
         return len(self.memory)
