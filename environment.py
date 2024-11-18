@@ -25,8 +25,8 @@ class CartPole:
 
 
 class Breakout:
-    def __init__(self):
-        self.env = gym.make("ALE/Breakout-v5")
+    def __init__(self, **kwargs):
+        self.env = gym.make("ALE/Breakout-v5", **kwargs)
         self.action_space = self.env.action_space
         self.taken_actions = {i: 0 for i in range(self.action_space.n)}
         self.last_n_actions = deque(maxlen=1000)
@@ -48,6 +48,9 @@ class Breakout:
             info["lost_life"] = True
 
         return frame, reward, done, truncated, info
+
+    def render(self):
+        self.env.render()
 
     def close(self):
         self.env.close()
