@@ -32,6 +32,7 @@ def load_params(config_path: str):
         gamma, \
         tau, \
         lr, \
+        epsilon_warmup, \
         epsilon_decay_steps, \
         epsilon_start, \
         epsilon_end, \
@@ -47,6 +48,7 @@ def load_params(config_path: str):
     gamma = config["general"]["gamma"]
     tau = config["general"]["tau"]
     lr = config["general"]["lr"]
+    epsilon_warmup = config["epsilon"]["warmup"]
     epsilon_decay_steps = config["epsilon"]["decay_steps"]
     epsilon_start = config["epsilon"]["start"]
     epsilon_end = config["epsilon"]["end"]
@@ -130,7 +132,9 @@ if __name__ == "__main__":
 
     eval_net.load_state_dict(train_net.state_dict())
 
-    epsilon = EpsilonScheduler(epsilon_start, epsilon_end, epsilon_decay_steps)
+    epsilon = EpsilonScheduler(
+        epsilon_start, epsilon_end, epsilon_decay_steps, epsilon_warmup
+    )
     optimizer = optim.AdamW(train_net.parameters(), lr=lr, amsgrad=True)
     criterion = nn.SmoothL1Loss()
 

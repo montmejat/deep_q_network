@@ -9,6 +9,7 @@ tau = 0.005
 lr = 1e-4
 
 [epsilon]
+warmup = 1_000
 decay_steps = 50_000
 start = 1.0
 end = 0.1
