@@ -138,7 +138,7 @@ class ImageMemory:
 
 
 class EpsilonScheduler:
-    def __init__(self, start: int, end: int, decay_steps: int, warmup: int):
+    def __init__(self, start: float, end: float, decay_steps: float, warmup: float):
         self.start = start
         self.end = end
         self.decay_steps = decay_steps
@@ -147,11 +147,14 @@ class EpsilonScheduler:
 
     def next(self):
         if self.iteration < self.warmup:
+            self.iteration += 1
             return self.start
 
-        epsilon = self.end + (self.start - self.end) * math.exp(
-            -1.0 * (self.iteration - self.warmup) / self.decay_steps
-        )
-        self.iteration += 1
+        step = 1 - ((self.iteration - self.warmup) / self.decay_steps)
+        if step > 0:
+            epsilon = self.end + (self.start - self.end) * step
+        else:
+            epsilon = self.end
 
+        self.iteration += 1
         return epsilon
